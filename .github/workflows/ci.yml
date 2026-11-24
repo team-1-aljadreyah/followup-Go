@@ -1,0 +1,29 @@
+name: Go CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  test-and-build:
+    name: Vet, Test & Build (CGO_ENABLED=0)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - name: Vet
+        run: CGO_ENABLED=0 go vet ./...
+      - name: Test
+        run: CGO_ENABLED=0 go test -v ./...
+      - name: Build Linux amd64 binaries
+        run: |
+          CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -o bin/followapi-linux-amd64 ./cmd/server
+          CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -o bin/followapi-cli-linux-amd64 ./cmd/cli
+      - name: Build Windows amd64 binaries
+        run: |
+          CGO_ENABLED=0 GOOS=windows GOARCH=amd64 go build -o bin/followapi.exe ./cmd/server
+          CGO_ENABLED=0 GOOS=windows GOARCH=amd64 go build -o bin/followapi-cli.exe ./cmd/cli

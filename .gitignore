@@ -1,0 +1,29 @@
+# Compiled binaries & build artifacts
+/bin/
+*.exe
+*.dll
+*.so
+*.dylib
+*.test
+*.out
+*.zip
+
+# Environment & secrets (never commit live credentials or private keys)
+.env
+.env.*
+!.env.example
+
+# Local runtime storage, databases & logs
+/storage/
+*.sqlite
+*.sqlite*
+*.db
+*.log
+
+# OS & editor files
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+.fleet/
+.zed/
