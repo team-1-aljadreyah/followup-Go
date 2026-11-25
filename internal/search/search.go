@@ -45,38 +45,40 @@ func (s *Service) HandleSearch(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	visibleProjs := map[int64]*access.Project{}
-	projResults := []map[string]any{}
+	hits := []map[string]any{}
+	projCount := 0
 	for _, p := range projects {
 		if !access.CanSeeProject(u, p) {
 			continue
 		}
 		visibleProjs[p.ID] = p
-		if len(projResults) < eachLimit && support.SearchMatches(q, p.Name, derefStr(p.NameEn), p.Code) {
+		if projCount < eachLimit && support.SearchMatches(q, p.Name, derefStr(p.NameEn), p.Code) {
 			item := map[string]any{
+				"kind":  "project",
 				"id":    p.ID,
+				"title": p.Name,
 				"code":  p.Code,
-				"name":  p.Name,
-				"state": p.State,
 			}
 			if p.NameEn != nil && *p.NameEn != "" {
-				item["name_en"] = *p.NameEn
+				item["title_en"] = *p.NameEn
 			}
-			projResults = append(projResults, item)
+			hits = append(hits, item)
+			projCount++
 		}
 	}
 
 	// Search tasks across visible projects
-	taskResults := []map[string]any{}
+	taskCount := 0
 	if len(visibleProjs) > 0 {
-		rows, err := s.db.QueryContext(ctx, `SELECT id, project_id, code, title, status FROM tasks ORDER BY id DESC`)
+		rows, err := s.db.QueryContext(ctx, `SELECT id, project_id, code, title FROM tasks ORDER BY id DESC`)
 		if err == nil {
 			for rows.Next() {
-				if len(taskResults) >= eachLimit {
+				if taskCount >= eachLimit {
 					break
 				}
 				var id, pid int64
-				var code, title, status string
-				if rows.Scan(&id, &pid, &code, &title, &status) != nil {
+				var code, title string
+				if rows.Scan(&id, &pid, &code, &title) != nil {
 					continue
 				}
 				p, ok := visibleProjs[pid]
@@ -84,14 +86,18 @@ func (s *Service) HandleSearch(w http.ResponseWriter, r *http.Request) {
 					continue
 				}
 				if support.SearchMatches(q, title, code) {
-					taskResults = append(taskResults, map[string]any{
-						"id":         id,
-						"project_id": pid,
-						"code":       code,
-						"title":      title,
-						"status":     status,
-						"context":    p.Name,
-					})
+					item := map[string]any{
+						"kind":    "task",
+						"id":      id,
+						"title":   title,
+						"code":    code,
+						"context": p.Name,
+					}
+					if p.NameEn != nil && *p.NameEn != "" {
+						item["context_en"] = *p.NameEn
+					}
+					hits = append(hits, item)
+					taskCount++
 				}
 			}
 			_ = rows.Close()
@@ -99,17 +105,17 @@ func (s *Service) HandleSearch(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Search bugs across visible projects
-	bugResults := []map[string]any{}
+	bugCount := 0
 	if len(visibleProjs) > 0 {
-		rows, err := s.db.QueryContext(ctx, `SELECT id, project_id, code, title, status FROM bugs ORDER BY id DESC`)
+		rows, err := s.db.QueryContext(ctx, `SELECT id, project_id, code, title FROM bugs ORDER BY id DESC`)
 		if err == nil {
 			for rows.Next() {
-				if len(bugResults) >= eachLimit {
+				if bugCount >= eachLimit {
 					break
 				}
 				var id, pid int64
-				var code, title, status string
-				if rows.Scan(&id, &pid, &code, &title, &status) != nil {
+				var code, title string
+				if rows.Scan(&id, &pid, &code, &title) != nil {
 					continue
 				}
 				p, ok := visibleProjs[pid]
@@ -117,14 +123,18 @@ func (s *Service) HandleSearch(w http.ResponseWriter, r *http.Request) {
 					continue
 				}
 				if support.SearchMatches(q, title, code) {
-					bugResults = append(bugResults, map[string]any{
-						"id":         id,
-						"project_id": pid,
-						"code":       code,
-						"title":      title,
-						"status":     status,
-						"context":    p.Name,
-					})
+					item := map[string]any{
+						"kind":    "bug",
+						"id":      id,
+						"title":   title,
+						"code":    code,
+						"context": p.Name,
+					}
+					if p.NameEn != nil && *p.NameEn != "" {
+						item["context_en"] = *p.NameEn
+					}
+					hits = append(hits, item)
+					bugCount++
 				}
 			}
 			_ = rows.Close()
@@ -132,66 +142,66 @@ func (s *Service) HandleSearch(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Search announcements
-	annResults := []map[string]any{}
-	arows, err := s.db.QueryContext(ctx, `SELECT id, title, body, important, created_at FROM announcements ORDER BY important DESC, id DESC`)
+	annCount := 0
+	arows, err := s.db.QueryContext(ctx, `SELECT id, title, body FROM announcements ORDER BY important DESC, id DESC`)
 	if err == nil {
 		for arows.Next() {
-			if len(annResults) >= eachLimit {
+			if annCount >= eachLimit {
 				break
 			}
 			var id int64
 			var title, body string
-			var important int
-			var createdAtRaw any
-			if arows.Scan(&id, &title, &body, &important, &createdAtRaw) != nil {
+			if arows.Scan(&id, &title, &body) != nil {
 				continue
 			}
 			if support.SearchMatches(q, title, body) {
-				annResults = append(annResults, map[string]any{
-					"id":         id,
-					"title":      title,
-					"important":  important != 0,
-					"created_at": support.FormatISO(dbx.ParseTime(createdAtRaw)),
+				hits = append(hits, map[string]any{
+					"kind":  "announcement",
+					"id":    id,
+					"title": title,
 				})
+				annCount++
 			}
 		}
 		_ = arows.Close()
 	}
 
 	// Search active users
-	peopleResults := []map[string]any{}
+	peopleCount := 0
 	users, err := store.LoadAllUsers(ctx, s.db, "")
 	if err == nil {
 		for _, cand := range users {
 			if !cand.Active {
 				continue
 			}
-			if len(peopleResults) >= eachLimit {
+			if peopleCount >= eachLimit {
 				break
 			}
 			if support.SearchMatches(q, cand.Name, derefStr(cand.NameEn), cand.Email, cand.Title) {
 				item := map[string]any{
-					"id":      cand.ID,
-					"name":    cand.Name,
-					"name_en": cand.NameEn,
-					"role":    cand.Role,
-					"team_id": cand.TeamID,
+					"kind":  "person",
+					"id":    cand.ID,
+					"title": cand.Name,
+					"role":  cand.Role,
+				}
+				if cand.NameEn != nil && *cand.NameEn != "" {
+					item["title_en"] = *cand.NameEn
 				}
 				if cand.Title != "" {
 					item["context"] = cand.Title
 				}
-				peopleResults = append(peopleResults, item)
+				if cand.TeamID != nil {
+					item["team_id"] = *cand.TeamID
+				}
+				hits = append(hits, item)
+				peopleCount++
 			}
 		}
 	}
 
 	httpx.Success(w, map[string]any{
-		"q":             q,
-		"projects":      projResults,
-		"tasks":         taskResults,
-		"bugs":          bugResults,
-		"announcements": annResults,
-		"people":        peopleResults,
+		"q":    q,
+		"hits": hits,
 	})
 }
 

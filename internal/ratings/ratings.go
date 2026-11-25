@@ -24,7 +24,7 @@ import (
 	"followapi/internal/support"
 )
 
-var ReasonTypes = []string{"quality", "speed", "teamwork", "commitment", "leadership", "other"}
+var ReasonTypes = []string{"quality", "deadlines", "teamwork", "attitude", "incident", "other"}
 
 var ScoreWordsAr = map[int]string{
 	1: "ضعيف", 2: "مقبول", 3: "جيد", 4: "جيد جداً", 5: "ممتاز",

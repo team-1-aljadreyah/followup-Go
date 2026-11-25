@@ -66,6 +66,23 @@ func normalizeAuditAction(action string) string {
 	}
 }
 
+func expandAuditActionAliases(action string) []string {
+	switch normalizeAuditAction(action) {
+	case "user_changed":
+		return []string{"user_changed", "user_updated"}
+	case "team_changed":
+		return []string{"team_changed", "team_updated"}
+	case "settings_changed":
+		return []string{"settings_changed", "settings_updated"}
+	case "session_ended":
+		return []string{"session_ended", "session_revoked"}
+	case "sessions_ended":
+		return []string{"sessions_ended", "sessions_revoked"}
+	default:
+		return []string{action}
+	}
+}
+
 type Service struct {
 	db       *dbx.DB
 	cfg      config.Config
@@ -134,7 +151,7 @@ func (s *Service) HandleCreateUser(w http.ResponseWriter, r *http.Request) {
 	if cr := strings.TrimSpace(strVal(input["custom_role"])); cr != "" {
 		found := s.advanced.FindRoleByKey(ctx, cr)
 		if found == nil {
-			httpx.HandleErr(w, r, httpx.ErrValidation("custom_role", "api.admin.custom_role_not_found"))
+			httpx.HandleErr(w, r, httpx.ErrValidation("role", "api.admin.custom_role_not_found"))
 			return
 		}
 		customRole = &cr
@@ -166,7 +183,7 @@ func (s *Service) HandleCreateUser(w http.ResponseWriter, r *http.Request) {
 	birthDate := optStr(input["birth_date"])
 	if birthDate != nil && *birthDate != "" {
 		if msg := support.BirthDateProblem(*birthDate, support.BaghdadToday()); msg != "" {
-			httpx.HandleErr(w, r, httpx.ErrValidation("birth_date", msg))
+			httpx.HandleErr(w, r, httpx.ErrValidation("birth_date", "api.admin.birth_date_"+msg))
 			return
 		}
 	} else {
@@ -217,7 +234,7 @@ func (s *Service) HandleCreateUser(w http.ResponseWriter, r *http.Request) {
 		var tname string
 		var tnameEn sql.NullString
 		_ = s.db.QueryRowContext(ctx, `SELECT name, name_en FROM teams WHERE id = ?`, *teamID).Scan(&tname, &tnameEn)
-		d := map[string]any{"team_name": tname}
+		d := map[string]any{"team_name": tname, "note": tname}
 		if tnameEn.Valid && tnameEn.String != "" {
 			d["team_name_en"] = tnameEn.String
 		}
@@ -518,7 +535,7 @@ func (s *Service) HandleUpdateUser(w http.ResponseWriter, r *http.Request) {
 		} else {
 			found := s.advanced.FindRoleByKey(ctx, cr)
 			if found == nil {
-				httpx.HandleErr(w, r, httpx.ErrValidation("custom_role", "api.admin.custom_role_not_found"))
+				httpx.HandleErr(w, r, httpx.ErrValidation("role", "api.admin.custom_role_not_found"))
 				return
 			}
 			newCustomRole = &cr
@@ -602,7 +619,7 @@ func (s *Service) HandleUpdateUser(w http.ResponseWriter, r *http.Request) {
 		bd := optStr(input["birth_date"])
 		if bd != nil && *bd != "" {
 			if msg := support.BirthDateProblem(*bd, support.BaghdadToday()); msg != "" {
-				httpx.HandleErr(w, r, httpx.ErrValidation("birth_date", msg))
+				httpx.HandleErr(w, r, httpx.ErrValidation("birth_date", "api.admin.birth_date_"+msg))
 				return
 			}
 			newBirthDate = bd
@@ -688,7 +705,7 @@ func (s *Service) HandleUpdateUser(w http.ResponseWriter, r *http.Request) {
 		var tname string
 		var tnameEn sql.NullString
 		_ = s.db.QueryRowContext(ctx, `SELECT name, name_en FROM teams WHERE id = ?`, *newTeamID).Scan(&tname, &tnameEn)
-		d := map[string]any{"team_name": tname}
+		d := map[string]any{"team_name": tname, "note": tname}
 		if tnameEn.Valid && tnameEn.String != "" {
 			d["team_name_en"] = tnameEn.String
 		}
@@ -775,7 +792,7 @@ func (s *Service) HandleSessions(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	idleEdge := dbx.FormatDBTime(time.Now().UTC().AddDate(0, 0, -14))
+	idleEdge := dbx.FormatDBTime(time.Now().UTC().AddDate(0, 0, -30))
 	where := []string{"s.ended_at IS NULL", "s.last_seen_at > ?"}
 	args := []any{idleEdge}
 	if uidStr := strings.TrimSpace(r.URL.Query().Get("user_id")); uidStr != "" {
@@ -1221,6 +1238,11 @@ func (s *Service) HandleCreateTeam(w http.ResponseWriter, r *http.Request) {
 	s.audit.Log(ctx, &u.ID, "team_created", "team", &newID, name, []audit.Change{{Field: "name", To: &name}})
 	if leadID != nil {
 		store.InvalidateUsersCache()
+		d := map[string]any{"team_name": name, "note": name}
+		if nameEn != nil && *nameEn != "" {
+			d["team_name_en"] = *nameEn
+		}
+		s.notif.Notify(ctx, []int64{*leadID}, "team_joined", notifications.About{ActorID: &u.ID, TeamID: &newID, Data: d})
 	}
 	s.ws.NotifySiteLive()
 	httpx.Success(w, map[string]any{
@@ -1281,7 +1303,8 @@ func (s *Service) HandleUpdateTeam(w http.ResponseWriter, r *http.Request) {
 	if hasKey(input, "name_en") {
 		newNameEn = optStr(input["name_en"])
 	}
-	newLead := nullIntPtr(curLead)
+	curLeadPtr := nullIntPtr(curLead)
+	newLead := curLeadPtr
 	if hasKey(input, "lead_id") {
 		newLead, err = s.validateLeadID(ctx, input["lead_id"])
 		if err != nil {
@@ -1308,6 +1331,13 @@ func (s *Service) HandleUpdateTeam(w http.ResponseWriter, r *http.Request) {
 	s.audit.Log(ctx, &u.ID, "team_changed", "team", &id, newName, nil)
 	if newLead != nil {
 		store.InvalidateUsersCache()
+		if !eqInt64Ptr(newLead, curLeadPtr) {
+			d := map[string]any{"team_name": newName, "note": newName}
+			if newNameEn != nil && *newNameEn != "" {
+				d["team_name_en"] = *newNameEn
+			}
+			s.notif.Notify(ctx, []int64{*newLead}, "team_joined", notifications.About{ActorID: &u.ID, TeamID: &id, Data: d})
+		}
 	}
 	s.ws.NotifySiteLive()
 	httpx.Success(w, map[string]any{
@@ -1474,14 +1504,77 @@ func (s *Service) HandleAudit(w http.ResponseWriter, r *http.Request) {
 	fromDay := strings.TrimSpace(q.Get("from"))
 	toDay := strings.TrimSpace(q.Get("to"))
 
-	rows, err := s.db.QueryContext(ctx, `
+	var where []string
+	var args []any
+
+	if kindFilter != "" {
+		var acts []string
+		for k, v := range auditActionKind {
+			if v == kindFilter {
+				acts = append(acts, expandAuditActionAliases(k)...)
+			}
+		}
+		if len(acts) == 0 {
+			httpx.Success(w, []map[string]any{})
+			return
+		}
+		where = append(where, fmt.Sprintf("a.action IN (%s)", dbx.Placeholders(len(acts))))
+		for _, a := range acts {
+			args = append(args, a)
+		}
+	}
+	if actionFilter != "" {
+		acts := expandAuditActionAliases(normalizeAuditAction(actionFilter))
+		where = append(where, fmt.Sprintf("a.action IN (%s)", dbx.Placeholders(len(acts))))
+		for _, a := range acts {
+			args = append(args, a)
+		}
+	}
+	if actorIDStr != "" {
+		aid, err := strconv.ParseInt(actorIDStr, 10, 64)
+		if err != nil || aid <= 0 {
+			httpx.Success(w, []map[string]any{})
+			return
+		}
+		where = append(where, "a.actor_id = ?")
+		args = append(args, aid)
+	}
+	if ipFilter != "" {
+		ipPrefix := strings.TrimSuffix(ipFilter, "*")
+		if ipPrefix != "" {
+			where = append(where, "a.ip LIKE ?")
+			args = append(args, ipPrefix+"%")
+		}
+	}
+	if fromDay != "" {
+		if t, err := time.ParseInLocation("2006-01-02", fromDay, support.WorkingLocation("Asia/Baghdad")); err == nil {
+			where = append(where, "a.at >= ?")
+			args = append(args, dbx.FormatDBTime(t.UTC()))
+		}
+	}
+	if toDay != "" {
+		if t, err := time.ParseInLocation("2006-01-02", toDay, support.WorkingLocation("Asia/Baghdad")); err == nil {
+			where = append(where, "a.at < ?")
+			args = append(args, dbx.FormatDBTime(t.AddDate(0, 0, 1).UTC()))
+		}
+	}
+
+	sqlQuery := `
 		SELECT a.id, a.actor_id, a.action, a.target_type, a.target_id, a.target_label, a.changes, a.at, a.ip, a.user_agent, a.session_id, a.request_id,
 		       u.name, u.name_en, u.role
 		FROM audit_logs a
-		LEFT JOIN users u ON u.id = a.actor_id
-		ORDER BY a.at DESC, a.id DESC
-		LIMIT 500
-	`)
+		LEFT JOIN users u ON u.id = a.actor_id`
+	if len(where) > 0 {
+		sqlQuery += " WHERE " + strings.Join(where, " AND ")
+	}
+	sqlQuery += " ORDER BY a.at DESC, a.id DESC"
+	if textQ == "" && ipFilter == "" {
+		sqlQuery += " LIMIT 200"
+	} else {
+		sqlQuery += " LIMIT 5000"
+	}
+
+	rows, err := s.db.QueryContext(ctx, sqlQuery, args...)
 	if err != nil {
 		httpx.HandleErr(w, r, err)
 		return
@@ -1729,17 +1822,17 @@ func (s *Service) validateTeamID(ctx context.Context, raw any) (*int64, error) {
 	if raw == nil {
 		return nil, nil
 	}
-	if f, ok := raw.(float64); ok && int64(f) > 0 {
-		id := int64(f)
+	if str, ok := raw.(string); ok && strings.TrimSpace(str) == "" {
+		return nil, nil
+	}
+	if n, ok := toIntStrict(raw); ok && n > 0 {
+		id := int64(n)
 		var cnt int
 		_ = s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM teams WHERE id = ?`, id).Scan(&cnt)
 		if cnt == 0 {
 			return nil, httpx.ErrValidation("team_id", "api.admin.team_not_found")
 		}
 		return &id, nil
-	}
-	if str, ok := raw.(string); ok && strings.TrimSpace(str) == "" {
-		return nil, nil
 	}
 	return nil, httpx.ErrValidation("team_id", "api.admin.team_not_found")
 }
@@ -1748,11 +1841,9 @@ func (s *Service) validateLeadID(ctx context.Context, raw any) (*int64, error) {
 	if raw == nil {
 		return nil, nil
 	}
-	var id int64
-	if f, ok := raw.(float64); ok {
-		id = int64(f)
-	}
-	if id <= 0 {
+	n, ok := toIntStrict(raw)
+	id := int64(n)
+	if !ok || id <= 0 {
 		return nil, httpx.ErrValidation("lead_id", "api.admin.team_lead_invalid")
 	}
 	var role string
@@ -1853,15 +1944,19 @@ func strValPtr(p *string) string {
 }
 
 func mapImportRole(raw string) string {
-	switch raw {
-	case "pm", "project manager", "مدير مشروع":
+	switch strings.ToLower(strings.TrimSpace(raw)) {
+	case "pm", "project manager", "department manager", "مدير مشروع", "مدير القسم":
 		return "pm"
-	case "monitor", "المتابعة":
+	case "monitor", "monitoring & evaluation", "monitoring and evaluation", "المتابعة", "مسؤول المتابعة والتقييم":
 		return "monitor"
-	case "lead", "team leader", "قائد فريق":
+	case "lead", "team leader", "team lead", "قائد فريق", "قائد الفريق":
 		return "lead"
 	case "employee", "موظف":
 		return "employee"
+	case "ceo", "المدير التنفيذي":
+		return "ceo"
+	case "admin", "system admin", "مسؤول النظام":
+		return "admin"
 	default:
 		return raw
 	}
@@ -1925,6 +2020,13 @@ func maskPtr(p *string) *string {
 }
 func toIntStrict(v any) (int, bool) {
 	switch x := v.(type) {
+	case json.Number:
+		if i, err := x.Int64(); err == nil {
+			return int(i), true
+		}
+		if f, err := x.Float64(); err == nil && float64(int(f)) == f {
+			return int(f), true
+		}
 	case float64:
 		if float64(int(x)) == x {
 			return int(x), true

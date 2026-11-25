@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+	"reflect"
 	"strings"
 	"sync"
 	"time"
@@ -419,12 +420,20 @@ func CleanMap(m map[string]any, keepNullKeys ...string) map[string]any {
 	}
 	out := make(map[string]any, len(m))
 	for k, v := range m {
-		if v == nil && !keep[k] {
+		if isNilOrTypedNilPtr(v) && !keep[k] {
 			continue
 		}
 		out[k] = v
 	}
 	return out
+}
+
+func isNilOrTypedNilPtr(v any) bool {
+	if v == nil {
+		return true
+	}
+	rv := reflect.ValueOf(v)
+	return rv.Kind() == reflect.Ptr && rv.IsNil()
 }
 
 func IsoTime(t *time.Time) any {

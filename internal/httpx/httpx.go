@@ -96,7 +96,7 @@ func ErrValidationMap(messageKey string, fieldKeys map[string]string) *APIError 
 }
 
 func ErrConflict(key string) *APIError {
-	return &APIError{Status: http.StatusConflict, Code: "CONFLICT", Key: key}
+	return &APIError{Status: http.StatusConflict, Code: "BAD_STATE", Key: key}
 }
 
 func ErrRateLimited(key string, params ...map[string]any) *APIError {

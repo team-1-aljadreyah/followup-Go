@@ -239,6 +239,10 @@ func (s *Service) HandleCreate(w http.ResponseWriter, r *http.Request) {
 		ceoStatePtr = &cs
 	}
 
+	var shareUsers map[int64]*store.User
+	if len(shareIDs) > 0 {
+		shareUsers, _ = store.LoadUsersByIDs(r.Context(), s.db, "", shareIDs)
+	}
 	var noteID int64
 	var sharedAdded []int64
 	err = s.db.Tx(r.Context(), func(tx *sql.Tx) error {
@@ -251,7 +255,7 @@ func (s *Service) HandleCreate(w http.ResponseWriter, r *http.Request) {
 		}
 		noteID, _ = res.LastInsertId()
 		if len(shareIDs) > 0 {
-			sharedAdded = s.applySharesTx(r.Context(), tx, noteID, u.ID, shareIDs, nowStr)
+			sharedAdded = s.applySharesTx(r.Context(), tx, noteID, u.ID, shareIDs, shareUsers, nowStr)
 		}
 		return nil
 	})
@@ -327,7 +331,11 @@ func (s *Service) HandleShare(w http.ResponseWriter, r *http.Request) {
 		httpx.HandleErr(w, r, err)
 		return
 	}
-	rawIDs := uniqueInt64(toInt64Slice(input["share_ids"]))
+	rawVal := input["user_ids"]
+	if rawVal == nil {
+		rawVal = input["share_ids"]
+	}
+	rawIDs := uniqueInt64(toInt64Slice(rawVal))
 	if len(rawIDs) == 0 {
 		httpx.HandleErr(w, r, httpx.ErrValidation("share_ids", "api.monitoring.share_min"))
 		return
@@ -337,9 +345,10 @@ func (s *Service) HandleShare(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	nowStr := dbx.FormatDBTime(time.Now().UTC())
+	shareUsers, _ := store.LoadUsersByIDs(r.Context(), s.db, "", rawIDs)
 	var added []int64
 	_ = s.db.Tx(r.Context(), func(tx *sql.Tx) error {
-		added = s.applySharesTx(r.Context(), tx, id, meta.authorID, rawIDs, nowStr)
+		added = s.applySharesTx(r.Context(), tx, id, meta.authorID, rawIDs, shareUsers, nowStr)
 		return nil
 	})
 	if len(added) > 0 {
@@ -769,8 +778,7 @@ func (s *Service) validateShareIDs(ctx context.Context, ids []int64) error {
 	return nil
 }
 
-func (s *Service) applySharesTx(ctx context.Context, tx *sql.Tx, noteID, authorID int64, ids []int64, nowStr string) []int64 {
-	uMap, _ := store.LoadUsersByIDs(ctx, s.db, "", ids)
+func (s *Service) applySharesTx(ctx context.Context, tx *sql.Tx, noteID, authorID int64, ids []int64, uMap map[int64]*store.User, nowStr string) []int64 {
 	already := map[int64]bool{}
 	rows, _ := tx.QueryContext(ctx, `SELECT user_id FROM monitor_note_shares WHERE note_id = ?`, noteID)
 	if rows != nil {

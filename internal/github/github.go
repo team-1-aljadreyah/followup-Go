@@ -20,6 +20,7 @@ import (
 	"followapi/internal/dbx"
 	"followapi/internal/httpx"
 	"followapi/internal/notifications"
+	"followapi/internal/store"
 )
 
 const maxRepos = 5
@@ -60,6 +61,10 @@ func (s *Service) HandleProjectSettings(w http.ResponseWriter, r *http.Request) 
 func (s *Service) HandleSaveProjectSettings(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 	u := httpx.UserFrom(ctx)
+	if err := s.advanced.RequireFeature(ctx, u, "github"); err != nil {
+		httpx.HandleErr(w, r, err)
+		return
+	}
 	pid, err := httpx.URLInt64(r, "id")
 	if err != nil {
 		httpx.HandleErr(w, r, err)
@@ -175,8 +180,7 @@ func (s *Service) HandleTaskItems(w http.ResponseWriter, r *http.Request) {
 		httpx.HandleErr(w, r, err)
 		return
 	}
-	items := s.matchingItemsForCode(ctx, pid, code)
-	httpx.Success(w, items)
+	httpx.Success(w, s.projectLinksForCode(ctx, u, pid, code))
 }
 
 func (s *Service) HandleBugItems(w http.ResponseWriter, r *http.Request) {
@@ -202,8 +206,22 @@ func (s *Service) HandleBugItems(w http.ResponseWriter, r *http.Request) {
 		httpx.HandleErr(w, r, err)
 		return
 	}
-	items := s.matchingItemsForCode(ctx, pid, code)
-	httpx.Success(w, items)
+	httpx.Success(w, s.projectLinksForCode(ctx, u, pid, code))
+}
+
+func (s *Service) projectLinksForCode(ctx context.Context, u *store.User, pid int64, code string) map[string]any {
+	if u != nil && !u.IsCEO() && !s.advanced.FeatureIsOn(ctx, "github") {
+		return map[string]any{"enabled": false, "repos": []string{}, "items": []map[string]any{}}
+	}
+	enabled, repos := s.loadProjectSettings(ctx, pid)
+	if !enabled {
+		return map[string]any{"enabled": false, "repos": []string{}, "items": []map[string]any{}}
+	}
+	return map[string]any{
+		"enabled": true,
+		"repos":   repos,
+		"items":   s.matchingItemsForCode(ctx, pid, code),
+	}
 }
 
 func (s *Service) HandleWebhook(w http.ResponseWriter, r *http.Request) {
@@ -493,6 +511,11 @@ func (s *Service) notifyMergedPR(ctx context.Context, repoName, title, extID str
 			recs = append(recs, h.assignee.Int64)
 		}
 		d := notifications.AboutTask(h.code, h.title, p.Name, p.NameEn)
+		prNote := repoName
+		if prNum := strings.TrimPrefix(extID, "pr:"); prNum != "" && prNum != extID {
+			prNote = fmt.Sprintf("%s #%s", repoName, prNum)
+		}
+		d["note"] = prNote
 		d["pr_title"] = title
 		d["repo"] = repoName
 		dk := fmt.Sprintf("gh_pr_merged:%s:%s:t%d", repoName, extID, h.tid)
@@ -535,11 +558,17 @@ func strVal(v any) string {
 }
 
 func int64Val(v any) int64 {
-	if f, ok := v.(float64); ok {
-		return int64(f)
-	}
-	if i, ok := v.(int64); ok {
-		return i
+	switch x := v.(type) {
+	case json.Number:
+		if i, err := x.Int64(); err == nil {
+			return i
+		}
+	case float64:
+		return int64(x)
+	case int64:
+		return x
+	case int:
+		return int64(x)
 	}
 	return 0
 }

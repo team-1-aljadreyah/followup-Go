@@ -309,6 +309,13 @@ func runDeploymentCheck(ctx context.Context, cfg config.Config, db *dbx.DB) int 
 	_ = db.QueryRowContext(ctx, `SELECT COUNT(*) FROM users WHERE role = 'ceo' AND active = 1`).Scan(&ceoCnt)
 	check("Active CEO account", ceoCnt > 0, fmt.Sprintf("count=%d", ceoCnt))
 
+	var critCnt int
+	_ = db.QueryRowContext(ctx, `SELECT COUNT(*) FROM performance_criteria WHERE id = 1`).Scan(&critCnt)
+	check("Performance criteria row 1", critCnt > 0, fmt.Sprintf("count=%d", critCnt))
+
+	schedOn := strings.EqualFold(os.Getenv("ENABLE_DAILY_SCHEDULER"), "true") || os.Getenv("ENABLE_DAILY_SCHEDULER") == "1"
+	check("Daily reminder scheduler env", schedOn, fmt.Sprintf("ENABLE_DAILY_SCHEDULER=%v", schedOn))
+
 	if !ok {
 		return 1
 	}

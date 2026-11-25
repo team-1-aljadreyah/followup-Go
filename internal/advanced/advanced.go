@@ -678,7 +678,7 @@ func (s *Service) HandleSave(w http.ResponseWriter, r *http.Request) {
 			if isAr {
 				sep = "، "
 			}
-			httpx.HandleErr(w, r, &httpx.APIError{Status: 409, Code: "CONFLICT", Key: "api.advanced.role_in_use", Params: map[string]any{"list": strings.Join(inUse, sep)}})
+			httpx.HandleErr(w, r, &httpx.APIError{Status: 409, Code: "BAD_STATE", Key: "api.advanced.role_in_use", Params: map[string]any{"list": strings.Join(inUse, sep)}})
 			return
 		}
 		httpx.HandleErr(w, r, err)
@@ -764,6 +764,9 @@ func isOwnBookkeepingRoute(path string) bool {
 		return true
 	}
 	if strings.HasPrefix(p, "/api/v1/announcements/") && strings.HasSuffix(p, "/seen") {
+		return true
+	}
+	if strings.HasPrefix(p, "/api/v1/monitoring/notes/") && strings.HasSuffix(p, "/seen") {
 		return true
 	}
 	return false
@@ -1188,9 +1191,11 @@ func diffRules(before, after map[string]any) []map[string]any {
 					out = append(out, map[string]any{"key": "roles." + rk, "from": x, "to": y})
 				}
 			}
-		} else if am, okA := a.(map[string]any); okA {
+		} else if am, okA := a.(map[string]any); okA && am != nil {
 			bm := asMap(b)
-			if bm != nil {
+			if bm == nil {
+				out = append(out, map[string]any{"key": k, "from": am, "to": nil})
+			} else {
 				subs := map[string]bool{}
 				for sk := range am {
 					subs[sk] = true
@@ -1212,16 +1217,28 @@ func diffRules(before, after map[string]any) []map[string]any {
 }
 
 func normSet(v any) any {
-	arr, ok := v.([]any)
-	if !ok {
-		return v
+	switch arr := v.(type) {
+	case []any:
+		strs := make([]string, len(arr))
+		for i, item := range arr {
+			strs[i] = fmt.Sprint(item)
+		}
+		sort.Strings(strs)
+		return strs
+	case []string:
+		strs := make([]string, len(arr))
+		copy(strs, arr)
+		sort.Strings(strs)
+		return strs
+	case []int:
+		strs := make([]string, len(arr))
+		for i, item := range arr {
+			strs[i] = fmt.Sprint(item)
+		}
+		sort.Strings(strs)
+		return strs
 	}
-	strs := make([]string, len(arr))
-	for i, item := range arr {
-		strs[i] = fmt.Sprint(item)
-	}
-	sort.Strings(strs)
-	return strs
+	return v
 }
 
 func normRole(rm map[string]any) map[string]any {

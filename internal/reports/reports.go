@@ -293,7 +293,10 @@ func (s *Service) HandleOverview(w http.ResponseWriter, r *http.Request) {
 		if personStats[i].Late != personStats[j].Late {
 			return personStats[i].Late > personStats[j].Late
 		}
-		return personStats[i].Open > personStats[j].Open
+		if personStats[i].Open != personStats[j].Open {
+			return personStats[i].Open > personStats[j].Open
+		}
+		return personStats[i].UserID < personStats[j].UserID
 	})
 	peopleRows := make([]map[string]any, 0, len(personStats))
 	for _, ps := range personStats {

@@ -173,7 +173,7 @@ func (s *Service) HandleCreate(w http.ResponseWriter, r *http.Request) {
 		httpx.HandleErr(w, r, err)
 		return
 	}
-	if err := s.checkFields(r.Context(), p, fields, true); err != nil {
+	if err := s.checkFields(r.Context(), p, fields, true, nil); err != nil {
 		httpx.HandleErr(w, r, err)
 		return
 	}
@@ -217,6 +217,7 @@ func (s *Service) HandleCreate(w http.ResponseWriter, r *http.Request) {
 	nowStr := dbx.FormatDBTime(time.Now().UTC())
 	taskPrefix := s.advanced.CodePrefix(r.Context(), "task")
 
+	var addedToProject *int64
 	err = s.db.Tx(r.Context(), func(tx *sql.Tx) error {
 		code, err := dbx.NextCode(r.Context(), s.db, tx, "task", taskPrefix)
 		if err != nil {
@@ -232,13 +233,32 @@ func (s *Service) HandleCreate(w http.ResponseWriter, r *http.Request) {
 		}
 		taskID, _ = res.LastInsertId()
 		_, err = tx.ExecContext(r.Context(), `INSERT INTO task_events (task_id, actor_id, kind, at) VALUES (?, ?, 'created', ?)`, taskID, u.ID, nowStr)
-		return err
+		if err != nil {
+			return err
+		}
+		if assigneeID != nil && !p.IsMember(*assigneeID) {
+			if _, err := tx.ExecContext(r.Context(), s.db.InsertIgnore()+` INTO project_members (project_id, user_id, created_at) VALUES (?, ?, ?)`, p.ID, *assigneeID, nowStr); err != nil {
+				return err
+			}
+			_, _ = tx.ExecContext(r.Context(), `INSERT INTO project_events (project_id, actor_id, kind, `+"`to`"+`, at) VALUES (?, ?, 'member_added', ?, ?)`,
+				p.ID, u.ID, strconv.FormatInt(*assigneeID, 10), nowStr)
+			addedToProject = assigneeID
+		}
+		return nil
 	})
 	if err != nil {
 		httpx.HandleErr(w, r, err)
 		return
 	}
 
+	if addedToProject != nil {
+		access.InvalidateProjectsCache()
+		s.notifications.Notify(r.Context(), []int64{*addedToProject}, "project_added", notifications.About{
+			ActorID:   &u.ID,
+			ProjectID: &p.ID,
+			Data:      notifications.AboutProject(p.Name, p.NameEn),
+		})
+	}
 	if assigneeID != nil {
 		s.notifications.Notify(r.Context(), []int64{*assigneeID}, "task_assigned", notifications.About{
 			ActorID:   &u.ID,
@@ -303,7 +323,7 @@ func (s *Service) HandleUpdate(w http.ResponseWriter, r *http.Request) {
 	if _, ok := chk["due"]; !ok && t.due != nil {
 		chk["due"] = *t.due
 	}
-	if err := s.checkFields(r.Context(), p, chk, false); err != nil {
+	if err := s.checkFields(r.Context(), p, chk, false, t.assigneeID); err != nil {
 		httpx.HandleErr(w, r, err)
 		return
 	}
@@ -319,6 +339,7 @@ func (s *Service) HandleUpdate(w http.ResponseWriter, r *http.Request) {
 
 	nowStr := dbx.FormatDBTime(time.Now().UTC())
 	var notifyAssigneeID *int64
+	var addedToProject *int64
 	var notifyDue bool
 	var notifyDueVal *string
 
@@ -362,6 +383,14 @@ func (s *Service) HandleUpdate(w http.ResponseWriter, r *http.Request) {
 					t.assigneeID = after
 					if after != nil {
 						notifyAssigneeID = after
+						if !p.IsMember(*after) {
+							if _, err := tx.ExecContext(r.Context(), s.db.InsertIgnore()+` INTO project_members (project_id, user_id, created_at) VALUES (?, ?, ?)`, p.ID, *after, nowStr); err != nil {
+								return err
+							}
+							_, _ = tx.ExecContext(r.Context(), `INSERT INTO project_events (project_id, actor_id, kind, `+"`to`"+`, at) VALUES (?, ?, 'member_added', ?, ?)`,
+								p.ID, u.ID, strconv.FormatInt(*after, 10), nowStr)
+							addedToProject = after
+						}
 					}
 				}
 			case "priority":
@@ -431,6 +460,12 @@ func (s *Service) HandleUpdate(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	if addedToProject != nil {
+		access.InvalidateProjectsCache()
+		s.notifications.Notify(r.Context(), []int64{*addedToProject}, "project_added", notifications.About{
+			ActorID: &u.ID, ProjectID: &p.ID, Data: notifications.AboutProject(p.Name, p.NameEn),
+		})
+	}
 	if notifyAssigneeID != nil {
 		s.notifications.Notify(r.Context(), []int64{*notifyAssigneeID}, "task_assigned", notifications.About{
 			ActorID: &u.ID, ProjectID: &p.ID, TaskID: &t.id, Data: notifications.AboutTask(t.code, t.title, p.Name, p.NameEn),
@@ -1156,7 +1191,7 @@ func (s *Service) loadTasks(ctx context.Context, whereSQL string, args ...any) (
 	return list, nil
 }
 
-func (s *Service) checkFields(ctx context.Context, p *access.Project, fields map[string]any, isCreate bool) error {
+func (s *Service) checkFields(ctx context.Context, p *access.Project, fields map[string]any, isCreate bool, prevAssigneeID *int64) error {
 	if isCreate || hasKey(fields, "title") {
 		title := strings.TrimSpace(strVal(fields["title"]))
 		if title == "" {
@@ -1172,8 +1207,11 @@ func (s *Service) checkFields(ctx context.Context, p *access.Project, fields map
 	if hasKey(fields, "priority") && !store.UserHasRole(strVal(fields["priority"]), Priorities) {
 		return httpx.ErrValidation("priority", "api.tasks.priority_invalid")
 	}
-	if aid := optInt64(fields["assignee_id"]); aid != nil {
-		if !p.IsMember(*aid) {
+	if aid := optInt64(fields["assignee_id"]); aid != nil && (isCreate || !eqInt64Ptr(aid, prevAssigneeID)) {
+		var active int
+		var role string
+		err := s.db.QueryRowContext(ctx, `SELECT active, role FROM users WHERE id = ?`, *aid).Scan(&active, &role)
+		if err != nil || active == 0 || role == "admin" {
 			return httpx.ErrValidation("assignee_id", "api.tasks.assignee_not_member")
 		}
 	}
@@ -1221,7 +1259,7 @@ func (s *Service) mustNotWaitTx(ctx context.Context, tx *sql.Tx, p *access.Proje
 		if httpx.LocaleFrom(ctx) == "ar" {
 			sep = "، "
 		}
-		return &httpx.APIError{Status: 409, Code: "CONFLICT", Key: "api.tasks.waiting_for_dependencies", Params: map[string]any{"codes": strings.Join(open, sep)}}
+		return &httpx.APIError{Status: 409, Code: "BAD_STATE", Key: "api.tasks.waiting_for_dependencies", Params: map[string]any{"codes": strings.Join(open, sep)}}
 	}
 	return nil
 }

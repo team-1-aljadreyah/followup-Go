@@ -342,7 +342,7 @@ func (s *Service) HandleDownload(w http.ResponseWriter, r *http.Request) {
 	}
 
 	dispType := "attachment"
-	if len(rec.Voice) > 0 || strings.HasPrefix(rec.Mime, "audio/") || strings.HasPrefix(rec.Mime, "image/") {
+	if len(rec.Voice) > 0 || strings.HasPrefix(rec.Mime, "audio/") {
 		dispType = "inline"
 	}
 	w.Header().Set("Content-Type", rec.Mime)
@@ -465,7 +465,7 @@ func (s *Service) uploadVoice(ctx context.Context, u *store.User, ownerType stri
 	if len(raw) > MaxVoiceBytes {
 		return Record{}, httpx.ErrValidation("file", "api.attachments.voice_too_large")
 	}
-	dur, okDur := voice["duration_s"].(float64)
+	dur, okDur := toFloat64(voice["duration_s"])
 	if !okDur || math.IsNaN(dur) || math.IsInf(dur, 0) || dur <= 0 || dur > MaxVoiceSeconds {
 		return Record{}, httpx.ErrValidation("voice", "api.attachments.voice_duration")
 	}
@@ -475,7 +475,7 @@ func (s *Service) uploadVoice(ctx context.Context, u *store.User, ownerType stri
 	}
 	peaks := make([]int, VoicePeaks)
 	for i, pv := range peaksRaw {
-		pf, ok := pv.(float64)
+		pf, ok := toFloat64(pv)
 		if !ok || float64(int(pf)) != pf || int(pf) < 0 || int(pf) > 100 {
 			return Record{}, httpx.ErrValidation("voice", "api.attachments.voice_peaks")
 		}
@@ -644,4 +644,20 @@ func containsInt64(arr []int64, target int64) bool {
 
 func sanitizeFilename(name string) string {
 	return strings.ReplaceAll(strings.ReplaceAll(name, `"`, ""), "\n", "")
+}
+
+func toFloat64(v any) (float64, bool) {
+	switch x := v.(type) {
+	case json.Number:
+		if f, err := x.Float64(); err == nil {
+			return f, true
+		}
+	case float64:
+		return x, true
+	case int:
+		return float64(x), true
+	case int64:
+		return float64(x), true
+	}
+	return 0, false
 }

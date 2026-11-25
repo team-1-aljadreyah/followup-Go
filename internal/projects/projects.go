@@ -526,7 +526,7 @@ func (s *Service) HandleUpdate(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		if strings.HasPrefix(err.Error(), "api.projects.member_has_open_tasks|") {
 			nm := strings.TrimPrefix(err.Error(), "api.projects.member_has_open_tasks|")
-			httpx.HandleErr(w, r, &httpx.APIError{Status: 409, Code: "CONFLICT", Key: "api.projects.member_has_open_tasks", Params: map[string]any{"name": nm}})
+			httpx.HandleErr(w, r, &httpx.APIError{Status: 409, Code: "BAD_STATE", Key: "api.projects.member_has_open_tasks", Params: map[string]any{"name": nm}})
 			return
 		}
 		httpx.HandleErr(w, r, err)
@@ -661,7 +661,7 @@ func (s *Service) HandleSaveStatuses(w http.ResponseWriter, r *http.Request) {
 			if isEn {
 				lbl = old.NameEn
 			}
-			httpx.HandleErr(w, r, &httpx.APIError{Status: 409, Code: "CONFLICT", Key: "api.projects.statuses_in_use", Params: map[string]any{"name": lbl, "count": cnt}})
+			httpx.HandleErr(w, r, &httpx.APIError{Status: 409, Code: "BAD_STATE", Key: "api.projects.statuses_in_use", Params: map[string]any{"name": lbl, "count": cnt}})
 			return
 		}
 	}
@@ -688,7 +688,7 @@ func (s *Service) HandleSaveStatuses(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 		_, err := tx.ExecContext(r.Context(), `INSERT INTO project_events (project_id, actor_id, kind, `+"`from`"+`, `+"`to`"+`, at) VALUES (?, ?, 'statuses', ?, ?, ?)`,
-			p.ID, u.ID, strings.Join(beforeNames, "، "), strings.Join(afterNames, "، "), nowStr)
+			p.ID, u.ID, truncHistory(strings.Join(beforeNames, "، ")), truncHistory(strings.Join(afterNames, "، ")), nowStr)
 		return err
 	})
 	if err != nil {
@@ -771,7 +771,7 @@ func (s *Service) HandleSavePhases(w http.ResponseWriter, r *http.Request) {
 			var cnt int
 			_ = s.db.QueryRowContext(r.Context(), `SELECT COUNT(*) FROM tasks WHERE project_id = ? AND phase_id = ?`, p.ID, old.ID).Scan(&cnt)
 			if cnt > 0 {
-				httpx.HandleErr(w, r, &httpx.APIError{Status: 409, Code: "CONFLICT", Key: "api.projects.phases_in_use", Params: map[string]any{"name": old.Name, "count": cnt}})
+				httpx.HandleErr(w, r, &httpx.APIError{Status: 409, Code: "BAD_STATE", Key: "api.projects.phases_in_use", Params: map[string]any{"name": old.Name, "count": cnt}})
 				return
 			}
 			toDelete = append(toDelete, old.ID)
@@ -801,11 +801,11 @@ func (s *Service) HandleSavePhases(w http.ResponseWriter, r *http.Request) {
 		}
 		var fromPtr, toPtr *string
 		if len(beforeNames) > 0 {
-			s := strings.Join(beforeNames, "، ")
+			s := truncHistory(strings.Join(beforeNames, "، "))
 			fromPtr = &s
 		}
 		if len(afterNames) > 0 {
-			s := strings.Join(afterNames, "، ")
+			s := truncHistory(strings.Join(afterNames, "، "))
 			toPtr = &s
 		}
 		_, err := tx.ExecContext(r.Context(), `INSERT INTO project_events (project_id, actor_id, kind, `+"`from`"+`, `+"`to`"+`, at) VALUES (?, ?, 'phases', ?, ?, ?)`,
@@ -1027,7 +1027,7 @@ func (s *Service) HandleDeleteSprint(w http.ResponseWriter, r *http.Request) {
 	var used int
 	_ = s.db.QueryRowContext(r.Context(), `SELECT COUNT(*) FROM tasks WHERE sprint_id = ?`, id).Scan(&used)
 	if used > 0 {
-		httpx.HandleErr(w, r, &httpx.APIError{Status: 409, Code: "CONFLICT", Key: "api.projects.sprint_has_tasks", Params: map[string]any{"count": used}})
+		httpx.HandleErr(w, r, &httpx.APIError{Status: 409, Code: "BAD_STATE", Key: "api.projects.sprint_has_tasks", Params: map[string]any{"count": used}})
 		return
 	}
 	lbl := name + ": " + derefStr(dbx.ParseDateOnly(startRaw)) + " → " + derefStr(dbx.ParseDateOnly(endRaw))
@@ -1568,4 +1568,11 @@ func derefStr(s *string) string {
 		return ""
 	}
 	return *s
+}
+
+func truncHistory(s string) string {
+	if support.RuneLen(s) > 250 {
+		return support.TruncateRunes(s, 249) + "…"
+	}
+	return s
 }

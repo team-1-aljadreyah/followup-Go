@@ -96,16 +96,10 @@ func (s *Service) Send(ctx context.Context, dayOverride string) (map[string]int6
 		if p == nil || p.State != "active" || isDoneStatus(p, it.status) {
 			continue
 		}
-		recs := []int64{}
-		if it.assignee.Valid && it.assignee.Int64 > 0 {
-			recs = append(recs, it.assignee.Int64)
-		}
-		if p.PMID > 0 && (!it.assignee.Valid || p.PMID != it.assignee.Int64) {
-			recs = append(recs, p.PMID)
-		}
-		if len(recs) == 0 {
+		if !it.assignee.Valid || it.assignee.Int64 <= 0 {
 			continue
 		}
+		recs := []int64{it.assignee.Int64}
 		var kind string
 		if it.due < day {
 			kind = "task_overdue"
@@ -117,7 +111,7 @@ func (s *Service) Send(ctx context.Context, dayOverride string) (map[string]int6
 		data := notifications.AboutTask(it.code, it.title, p.Name, p.NameEn)
 		data["due"] = it.due
 		for _, uid := range recs {
-			dk := fmt.Sprintf("%s:%d:%s:u%d", kind, it.tid, day, uid)
+			dk := fmt.Sprintf("%s:%d:%s:u%d", kind, it.tid, it.due, uid)
 			n := s.notif.Notify(ctx, []int64{uid}, kind, notifications.About{
 				ProjectID: &it.pid,
 				TaskID:    &it.tid,
@@ -160,7 +154,7 @@ func (s *Service) Send(ctx context.Context, dayOverride string) (map[string]int6
 		if p == nil || p.State != "active" {
 			continue
 		}
-		recs := uniquePositive(p.PMID, it.reportedBy)
+		recs := uniquePositive(p.PMID)
 		if it.assignee.Valid {
 			recs = uniquePositive(append(recs, it.assignee.Int64)...)
 		}
@@ -169,7 +163,7 @@ func (s *Service) Send(ctx context.Context, dayOverride string) (map[string]int6
 		data["bug_title"] = it.title
 		data["due"] = it.due
 		for _, uid := range recs {
-			dk := fmt.Sprintf("bug_late:%d:%s:u%d", it.bid, day, uid)
+			dk := fmt.Sprintf("bug_late:%d:%s:u%d", it.bid, it.due, uid)
 			n := s.notif.Notify(ctx, []int64{uid}, "bug_late", notifications.About{
 				ProjectID: &it.pid,
 				BugID:     &it.bid,
@@ -180,13 +174,13 @@ func (s *Service) Send(ctx context.Context, dayOverride string) (map[string]int6
 		}
 	}
 
-	// 3. Birthdays (birthday_today & birthday_soon 7 days out)
+	// 3. Birthdays (birthday_today & birthday_soon 7 days out) — sent to active monitors & CEO only, without age
 	users, err := store.LoadAllUsers(ctx, s.db, "")
 	if err == nil {
-		var activeIDs []int64
+		var watcherIDs []int64
 		for _, cand := range users {
-			if cand.Active {
-				activeIDs = append(activeIDs, cand.ID)
+			if cand.Active && (cand.Role == "monitor" || cand.Role == "ceo") {
+				watcherIDs = append(watcherIDs, cand.ID)
 			}
 		}
 		for _, cand := range users {
@@ -197,8 +191,7 @@ func (s *Service) Send(ctx context.Context, dayOverride string) (map[string]int6
 			if !ok {
 				continue
 			}
-			age := support.AgeOn(*cand.BirthDate, bDate)
-			for _, recID := range activeIDs {
+			for _, recID := range watcherIDs {
 				if recID == cand.ID {
 					continue
 				}
@@ -206,8 +199,7 @@ func (s *Service) Send(ctx context.Context, dayOverride string) (map[string]int6
 				data := map[string]any{
 					"person_id":   cand.ID,
 					"person_name": cand.Name,
-					"date":        bDate,
-					"age":         age,
+					"due":         bDate,
 				}
 				if cand.NameEn != nil && *cand.NameEn != "" {
 					data["person_name_en"] = *cand.NameEn

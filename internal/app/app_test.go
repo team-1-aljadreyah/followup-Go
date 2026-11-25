@@ -678,8 +678,8 @@ func TestAvatarsChatCelebrationsTrialsMonitoringAdminSearchGithubReminders(t *te
 	}
 	var srch map[string]any
 	_ = json.Unmarshal(srchResp.Data, &srch)
-	if people, _ := srch["people"].([]any); len(people) == 0 {
-		t.Fatalf("expected search for 'Ali' to match seeded employee")
+	if hits, _ := srch["hits"].([]any); len(hits) == 0 {
+		t.Fatalf("expected search for 'Ali' to match seeded employee, got %v", srch)
 	}
 
 	// 6. GitHub settings + HMAC webhook for merged PR mentioning task code
@@ -737,10 +737,11 @@ func TestAvatarsChatCelebrationsTrialsMonitoringAdminSearchGithubReminders(t *te
 	if code != 200 {
 		t.Fatalf("GET task github items failed: %d", code)
 	}
-	var gi []map[string]any
-	_ = json.Unmarshal(giResp.Data, &gi)
-	if len(gi) != 1 || gi[0]["state"] != "merged" {
-		t.Fatalf("expected 1 merged github PR linked to %s, got %v", tcode, gi)
+	var giRespObj map[string]any
+	_ = json.Unmarshal(giResp.Data, &giRespObj)
+	giItems, _ := giRespObj["items"].([]any)
+	if en, _ := giRespObj["enabled"].(bool); !en || len(giItems) != 1 || giItems[0].(map[string]any)["state"] != "merged" {
+		t.Fatalf("expected enabled=true with 1 merged github PR linked to %s, got %v", tcode, giRespObj)
 	}
 
 	// 7. Daily reminders on non-leap 2026-02-28 triggers birthday_today for 1996-02-29 + task_due_soon/overdue, and dedups on 2nd run
@@ -808,8 +809,8 @@ func TestAvatarsChatCelebrationsTrialsMonitoringAdminSearchGithubReminders(t *te
 	// Ratings: CEO rates team & updates within 24h
 	code, rtResp, raw := e.req("POST", fmt.Sprintf("/api/v1/teams/%d/ratings", teamID), ceoTok, map[string]any{
 		"score":       5,
-		"reason_type": "speed",
-		"reason":      "Great migration speed",
+		"reason_type": "deadlines",
+		"reason":      "Great deadline delivery",
 	})
 	if code != 201 {
 		t.Fatalf("create team rating failed (%d): %s", code, string(raw))
@@ -1126,7 +1127,9 @@ func TestWebSocketLiveEventsAndAuthCloseCodes(t *testing.T) {
 	}
 	var advData map[string]any
 	_ = json.Unmarshal(advGet.Data, &advData)
-	code, _, raw = e.req("PUT", "/api/v1/admin/advanced", ceoTok, map[string]any{"rules": advData["rules"]})
+	advRules := advData["rules"].(map[string]any)
+	advRules["banner"] = map[string]any{"tone": "info", "text": "WS Live", "text_en": "WS Live", "roles": []string{"employee"}}
+	code, _, raw = e.req("PUT", "/api/v1/admin/advanced", ceoTok, map[string]any{"rules": advRules})
 	if code != 200 {
 		t.Fatalf("save advanced failed (%d): %s", code, string(raw))
 	}
@@ -1146,5 +1149,412 @@ func TestWebSocketLiveEventsAndAuthCloseCodes(t *testing.T) {
 	var outClose *websocket.CloseError
 	if outErr == nil || !errors.As(outErr, &outClose) || outClose.Code != 4401 {
 		t.Fatalf("expected 4401 close on logout, got: %v", outErr)
+	}
+}
+
+func TestContractFixesParts1To3(t *testing.T) {
+	e := newTestEnv(t)
+
+	pw := "Password#1234"
+	bEmp, bOut, bRep := "1995-03-10", "1994-03-03", "1992-07-07"
+	ceoID := e.seedUser("CEO User", "ceo@example.com", "ceo", pw, nil, nil)
+	adminID := e.seedUser("Admin User", "admin@example.com", "admin", pw, nil, nil)
+	monID := e.seedUser("Monitor User", "mon@example.com", "monitor", pw, nil, nil)
+	pmID := e.seedUser("PM User", "pm@example.com", "pm", pw, nil, nil)
+	leadID := e.seedUser("Lead User", "lead@example.com", "lead", pw, nil, nil)
+	empID := e.seedUser("Emp One", "emp1@example.com", "employee", pw, nil, &bEmp)
+	outsiderID := e.seedUser("Outsider Two", "outsider@example.com", "employee", pw, nil, &bOut)
+	reporterID := e.seedUser("Reporter Three", "rep@example.com", "employee", pw, nil, &bRep)
+
+	ceoTok := e.login("ceo@example.com", pw)
+	adminTok := e.login("admin@example.com", pw)
+	monTok := e.login("mon@example.com", pw)
+	pmTok := e.login("pm@example.com", pw)
+	empTok := e.login("emp1@example.com", pw)
+	_ = e.login("outsider@example.com", pw)
+	repTok := e.login("rep@example.com", pw)
+
+	// 1. Admin numeric parsing + team_joined note + lead notification + birth_date translated sentence + custom_role -> "role"
+	code, tResp, raw := e.req("POST", "/api/v1/admin/teams", adminTok, map[string]any{
+		"name":    "Platform Team",
+		"name_en": "Platform",
+		"lead_id": leadID,
+	})
+	if code != 201 {
+		t.Fatalf("create team with lead_id failed (%d): %s", code, string(raw))
+	}
+	var teamObj map[string]any
+	_ = json.Unmarshal(tResp.Data, &teamObj)
+	teamID := int64(teamObj["id"].(float64))
+
+	code, _, raw = e.req("PUT", "/api/v1/admin/settings", adminTok, map[string]any{"due_soon_days": 5})
+	if code != 200 {
+		t.Fatalf("PUT /admin/settings due_soon_days failed (%d): %s", code, string(raw))
+	}
+
+	code, badBirth, _ := e.req("POST", "/api/v1/admin/users", adminTok, map[string]any{
+		"name": "Young", "email": "young@example.com", "role": "employee", "password": "Password#1234", "birth_date": "2020-01-01",
+	})
+	if code != 422 || badBirth.Message == "young" || badBirth.Message == "" {
+		t.Fatalf("expected translated birth_date error, got code=%d msg=%q", code, badBirth.Message)
+	}
+
+	code, badCustomRole, _ := e.req("POST", "/api/v1/admin/users", adminTok, map[string]any{
+		"name": "BadRole", "email": "badrole@example.com", "role": "employee", "custom_role": "nonexistent_key", "password": "Password#1234",
+	})
+	if code != 422 || fmt.Sprint(badCustomRole.Errors["role"]) == "" || badCustomRole.Errors["role"] == nil {
+		t.Fatalf("expected custom_role error on field 'role', got code=%d errs=%v", code, badCustomRole.Errors)
+	}
+
+	code, nuResp, raw := e.req("POST", "/api/v1/admin/users", adminTok, map[string]any{
+		"name": "Member Four", "email": "m4@example.com", "role": "employee", "team_id": teamID, "password": "Password#1234",
+	})
+	if code != 201 {
+		t.Fatalf("create user with team_id failed (%d): %s", code, string(raw))
+	}
+	var nuObj map[string]any
+	_ = json.Unmarshal(nuResp.Data, &nuObj)
+	m4ID := int64(nuObj["id"].(float64))
+
+	var leadJoinNote, m4JoinNote string
+	_ = e.db.QueryRow(`SELECT JSON_EXTRACT(data, '$.note') FROM notifications WHERE user_id = ? AND kind = 'team_joined' ORDER BY id DESC LIMIT 1`, leadID).Scan(&leadJoinNote)
+	_ = e.db.QueryRow(`SELECT JSON_EXTRACT(data, '$.note') FROM notifications WHERE user_id = ? AND kind = 'team_joined' ORDER BY id DESC LIMIT 1`, m4ID).Scan(&m4JoinNote)
+	if !strings.Contains(leadJoinNote, "Platform Team") || !strings.Contains(m4JoinNote, "Platform Team") {
+		t.Fatalf("expected team_joined note for lead (%q) and member (%q)", leadJoinNote, m4JoinNote)
+	}
+
+	// 2. Bilingual CSV import roles
+	code, csvResp, raw := e.req("POST", "/api/v1/admin/users/import", adminTok, map[string]any{
+		"dry_run": true,
+		"rows": []map[string]any{
+			{"name": "A1", "email": "a1@example.com", "role": "مدير القسم", "password": "Password#1234"},
+			{"name": "A2", "email": "a2@example.com", "role": "Department manager", "password": "Password#1234"},
+			{"name": "A3", "email": "a3@example.com", "role": "مسؤول المتابعة والتقييم", "password": "Password#1234"},
+			{"name": "A4", "email": "a4@example.com", "role": "قائد الفريق", "password": "Password#1234"},
+		},
+	})
+	if code != 200 {
+		t.Fatalf("bilingual csv import failed (%d): %s", code, string(raw))
+	}
+	var csvData map[string]any
+	_ = json.Unmarshal(csvResp.Data, &csvData)
+	if int(csvData["skipped"].(float64)) != 0 {
+		t.Fatalf("expected 0 skipped bilingual CSV rows, got %v", csvData)
+	}
+
+	// 3. Project + cross-project task assignee auto-join + editing task whose assignee left project + BAD_STATE 409
+	code, pResp, _ := e.req("POST", "/api/v1/projects", pmTok, map[string]any{
+		"name": "CoreApp", "name_en": "CoreApp En", "description": "desc",
+		"pm_id": pmID, "start": "2026-01-01", "end": "2026-12-31",
+		"member_ids": []int64{empID, reporterID},
+	})
+	var pObj map[string]any
+	_ = json.Unmarshal(pResp.Data, &pObj)
+	pid := int64(pObj["id"].(float64))
+
+	// Admin cannot be assigned to a task
+	code, admAssign, _ := e.req("POST", fmt.Sprintf("/api/v1/projects/%d/tasks", pid), pmTok, map[string]any{
+		"title": "Admin Task", "assignee_id": adminID,
+	})
+	if code != 422 || admAssign.Errors["assignee_id"] == nil {
+		t.Fatalf("expected 422 assignee_id for admin user, got code=%d errs=%v", code, admAssign.Errors)
+	}
+
+	// Non-member outsider auto-joins project when assigned a task
+	code, tk1Resp, raw := e.req("POST", fmt.Sprintf("/api/v1/projects/%d/tasks", pid), pmTok, map[string]any{
+		"title": "Outsider Task", "assignee_id": outsiderID, "due": "2026-03-01",
+	})
+	if code != 201 {
+		t.Fatalf("create task for active outsider failed (%d): %s", code, string(raw))
+	}
+	var tk1 map[string]any
+	_ = json.Unmarshal(tk1Resp.Data, &tk1)
+	tk1ID := int64(tk1["id"].(float64))
+
+	var memCnt, projNotifCnt int
+	_ = e.db.QueryRow(`SELECT COUNT(*) FROM project_members WHERE project_id = ? AND user_id = ?`, pid, outsiderID).Scan(&memCnt)
+	_ = e.db.QueryRow(`SELECT COUNT(*) FROM notifications WHERE user_id = ? AND kind = 'project_added' AND project_id = ?`, outsiderID, pid).Scan(&projNotifCnt)
+	if memCnt != 1 || projNotifCnt != 1 {
+		t.Fatalf("expected outsider auto-added to project_members (%d) and notified project_added (%d)", memCnt, projNotifCnt)
+	}
+
+	// Mark tk1 done, remove outsider from project, create tk2 assigned to outsider removed -> editing tk2 title without changing assignee_id works!
+	_, _ = e.db.Exec(`DELETE FROM project_members WHERE project_id = ? AND user_id = ?`, pid, outsiderID)
+	code, _, raw = e.req("PATCH", fmt.Sprintf("/api/v1/tasks/%d", tk1ID), pmTok, map[string]any{
+		"title":       "Outsider Task Updated",
+		"assignee_id": outsiderID,
+	})
+	if code != 200 {
+		t.Fatalf("expected editing task whose assignee left project to succeed when assignee_id unchanged, got %d: %s", code, string(raw))
+	}
+
+	// Dependency 409 uses BAD_STATE
+	code, tk2Resp, _ := e.req("POST", fmt.Sprintf("/api/v1/projects/%d/tasks", pid), pmTok, map[string]any{
+		"title": "Dependent Task", "assignee_id": empID,
+	})
+	var tk2 map[string]any
+	_ = json.Unmarshal(tk2Resp.Data, &tk2)
+	tk2ID := int64(tk2["id"].(float64))
+	code, _, _ = e.req("PUT", fmt.Sprintf("/api/v1/tasks/%d/dependencies", tk2ID), pmTok, map[string]any{
+		"depends_on": []int64{tk1ID},
+	})
+	if code != 200 {
+		t.Fatalf("set dependency failed: %d", code)
+	}
+	code, depErr, _ := e.req("POST", fmt.Sprintf("/api/v1/tasks/%d/status", tk2ID), empTok, map[string]any{
+		"status": "completed",
+	})
+	if code != 409 || depErr.Code != "BAD_STATE" {
+		t.Fatalf("expected 409 BAD_STATE on blocked dependency move, got code=%d errCode=%q", code, depErr.Code)
+	}
+
+	// 4. Reminders: birthday only to monitor/ceo with `due` (no `age`/`date`), task_overdue assignee-only deduped across days, bug_late dev+PM only
+	_, _ = e.db.Exec(`INSERT INTO bugs (code, project_id, title, description, severity, priority, reported_by, assignee_id, due, status, created_at, updated_at) VALUES (?, ?, ?, '', 'major', 'high', ?, ?, ?, 'open', '2026-02-01 00:00:00', '2026-02-01 00:00:00')`,
+		"BUG-99", pid, "Late Bug", reporterID, empID, "2026-02-15")
+
+	_, err := e.app.Reminders.Send(context.Background(), "2026-03-03")
+	if err != nil {
+		t.Fatalf("reminders 2026-03-03 failed: %v", err)
+	}
+	// Repeat on next day 2026-03-04: same overdue task & bug with same due date must NOT re-notify!
+	statsNext, err := e.app.Reminders.Send(context.Background(), "2026-03-04")
+	if err != nil {
+		t.Fatalf("reminders 2026-03-04 failed: %v", err)
+	}
+	if statsNext["task_overdue"] != 0 || statsNext["bug_late"] != 0 {
+		t.Fatalf("expected 0 duplicate task_overdue/bug_late across days for same due date, got %v", statsNext)
+	}
+
+	// Verify task_overdue went to assignee only (NOT pmID)
+	var pmTaskOverdue int
+	_ = e.db.QueryRow(`SELECT COUNT(*) FROM notifications WHERE user_id = ? AND kind = 'task_overdue' AND task_id = ?`, pmID, tk1ID).Scan(&pmTaskOverdue)
+	if pmTaskOverdue != 0 {
+		t.Fatalf("expected PM NOT to receive task_overdue, got %d", pmTaskOverdue)
+	}
+
+	// Verify bug_late went to developer + PM, NOT reporterID
+	var repBugLate, empBugLate, pmBugLate int
+	_ = e.db.QueryRow(`SELECT COUNT(*) FROM notifications WHERE user_id = ? AND kind = 'bug_late'`, reporterID).Scan(&repBugLate)
+	_ = e.db.QueryRow(`SELECT COUNT(*) FROM notifications WHERE user_id = ? AND kind = 'bug_late'`, empID).Scan(&empBugLate)
+	_ = e.db.QueryRow(`SELECT COUNT(*) FROM notifications WHERE user_id = ? AND kind = 'bug_late'`, pmID).Scan(&pmBugLate)
+	if repBugLate != 0 || empBugLate != 1 || pmBugLate != 1 {
+		t.Fatalf("bug_late recipients wrong: reporter=%d dev=%d pm=%d", repBugLate, empBugLate, pmBugLate)
+	}
+
+	// Verify birthday_today for outsider (1994-03-03) went ONLY to monitor + ceo, with due and WITHOUT age/date
+	var bOtherCnt int
+	_ = e.db.QueryRow(`SELECT COUNT(*) FROM notifications WHERE kind = 'birthday_today' AND user_id NOT IN (?, ?)`, ceoID, monID).Scan(&bOtherCnt)
+	if bOtherCnt != 0 {
+		t.Fatalf("expected birthday notifications ONLY for monitor & ceo, saw %d for others", bOtherCnt)
+	}
+	var bRaw string
+	_ = e.db.QueryRow(`SELECT data FROM notifications WHERE kind = 'birthday_today' AND user_id = ? LIMIT 1`, monID).Scan(&bRaw)
+	var bData map[string]any
+	_ = json.Unmarshal([]byte(bRaw), &bData)
+	if bData["due"] != "2026-03-03" || bData["age"] != nil || bData["date"] != nil {
+		t.Fatalf("unexpected birthday payload: %v", bData)
+	}
+
+	// 5. GitHub switch FEATURE_OFF + {enabled:false, repos:[], items:[]} + PR webhook note
+	code, advGet, _ := e.req("GET", "/api/v1/admin/advanced", ceoTok, nil)
+	if code != 200 {
+		t.Fatalf("get advanced failed: %d", code)
+	}
+	var advObj map[string]any
+	_ = json.Unmarshal(advGet.Data, &advObj)
+	rules := advObj["rules"].(map[string]any)
+
+	// Saving identical rules produces NO history log
+	_, hBeforeResp, _ := e.req("GET", "/api/v1/admin/advanced/history", ceoTok, nil)
+	var hBefore []map[string]any
+	_ = json.Unmarshal(hBeforeResp.Data, &hBefore)
+	code, _, raw = e.req("PUT", "/api/v1/admin/advanced", ceoTok, map[string]any{"rules": rules})
+	if code != 200 {
+		t.Fatalf("save identical rules failed (%d): %s", code, string(raw))
+	}
+	_, hSameResp, _ := e.req("GET", "/api/v1/admin/advanced/history", ceoTok, nil)
+	var hSame []map[string]any
+	_ = json.Unmarshal(hSameResp.Data, &hSame)
+	if len(hSame) != len(hBefore) {
+		t.Fatalf("saving unchanged rules created spurious history entry: before=%d after=%d", len(hBefore), len(hSame))
+	}
+
+	// Turn github off + add banner, then remove banner (`nil`), and check history records banner removal!
+	feats := rules["features"].(map[string]any)
+	feats["github"] = false
+	rules["banner"] = map[string]any{"tone": "info", "text": "Notice", "roles": []string{"employee"}}
+	code, _, raw = e.req("PUT", "/api/v1/admin/advanced", ceoTok, map[string]any{"rules": rules})
+	if code != 200 {
+		t.Fatalf("save banner+github=false failed (%d): %s", code, string(raw))
+	}
+	rules["banner"] = nil
+	code, _, raw = e.req("PUT", "/api/v1/admin/advanced", ceoTok, map[string]any{"rules": rules})
+	if code != 200 {
+		t.Fatalf("remove banner failed (%d): %s", code, string(raw))
+	}
+	_, hRmResp, _ := e.req("GET", "/api/v1/admin/advanced/history", ceoTok, nil)
+	var hRm []map[string]any
+	_ = json.Unmarshal(hRmResp.Data, &hRm)
+	latestChanges := hRm[0]["changes"].([]any)
+	if len(latestChanges) != 1 || latestChanges[0].(map[string]any)["key"] != "banner" {
+		t.Fatalf("expected banner removal history change, got %v", latestChanges)
+	}
+
+	// GitHub off -> PUT returns 403 FEATURE_OFF, GET task/bug github returns {enabled:false, repos:[], items:[]}
+	code, featErr, _ := e.req("PUT", fmt.Sprintf("/api/v1/projects/%d/github", pid), pmTok, map[string]any{
+		"enabled": true, "repos": []string{"acme/app"},
+	})
+	if code != 403 || featErr.Code != "FEATURE_OFF" {
+		t.Fatalf("expected 403 FEATURE_OFF when github feature off, got code=%d err=%q", code, featErr.Code)
+	}
+	code, ghOffResp, _ := e.req("GET", fmt.Sprintf("/api/v1/tasks/%d/github", tk1ID), empTok, nil)
+	var ghOff map[string]any
+	_ = json.Unmarshal(ghOffResp.Data, &ghOff)
+	if code != 200 || ghOff["enabled"] != false {
+		t.Fatalf("expected {enabled:false} when feature off, got code=%d body=%v", code, ghOff)
+	}
+
+	// Re-enable github feature and test PR merged note = "acme/app #77"
+	feats["github"] = true
+	_, _, _ = e.req("PUT", "/api/v1/admin/advanced", ceoTok, map[string]any{"rules": rules})
+	code, _, _ = e.req("PUT", fmt.Sprintf("/api/v1/projects/%d/github", pid), pmTok, map[string]any{
+		"enabled": true, "repos": []string{"acme/app"},
+	})
+	if code != 200 {
+		t.Fatalf("save project github settings failed: %d", code)
+	}
+	whBody, _ := json.Marshal(map[string]any{
+		"action": "closed", "repository": map[string]any{"full_name": "acme/app"},
+		"pull_request": map[string]any{
+			"number": 77, "title": fmt.Sprintf("%v Fix bug", tk2["code"]),
+			"html_url": "https://github.com/acme/app/pull/77", "merged": true, "state": "closed",
+			"merged_at": "2026-03-04T12:00:00Z", "head": map[string]any{"ref": "main"}, "user": map[string]any{"login": "dev"},
+		},
+	})
+	mac := hmac.New(sha256.New, []byte(e.cfg.GithubWebhookSecret))
+	mac.Write(whBody)
+	whReq, _ := http.NewRequest("POST", e.srv.URL+"/api/v1/webhooks/github", bytes.NewReader(whBody))
+	whReq.Header.Set("X-GitHub-Event", "pull_request")
+	whReq.Header.Set("X-GitHub-Delivery", "deliv-contract-77")
+	whReq.Header.Set("X-Hub-Signature-256", "sha256="+hex.EncodeToString(mac.Sum(nil)))
+	if res, err := http.DefaultClient.Do(whReq); err != nil || res.StatusCode != 200 {
+		t.Fatalf("github pr webhook failed: %v", err)
+	}
+	var prNotifNote string
+	_ = e.db.QueryRow(`SELECT JSON_EXTRACT(data, '$.note') FROM notifications WHERE kind = 'github_pr_merged' ORDER BY id DESC LIMIT 1`).Scan(&prNotifNote)
+	if !strings.Contains(prNotifNote, "acme/app #77") {
+		t.Fatalf("expected github_pr_merged note 'acme/app #77', got %q", prNotifNote)
+	}
+
+	// 6. Search returns {q, hits}
+	code, srchResp, _ := e.req("GET", "/api/v1/search?q=CoreApp", empTok, nil)
+	var srchObj map[string]any
+	_ = json.Unmarshal(srchResp.Data, &srchObj)
+	hits, _ := srchObj["hits"].([]any)
+	if code != 200 || len(hits) == 0 || hits[0].(map[string]any)["kind"] != "project" {
+		t.Fatalf("expected {q, hits} with project hit, got code=%d body=%v", code, srchObj)
+	}
+
+	// 7. Monitoring share with user_ids & error key share_ids + seen allowed in read-only mode
+	code, mnResp, raw := e.req("POST", "/api/v1/monitoring/notes", monTok, map[string]any{
+		"kind": "problem", "title": "Observation", "body": "Checking progress",
+	})
+	if code != 201 {
+		t.Fatalf("create monitoring note failed (%d): %s", code, string(raw))
+	}
+	var mnObj map[string]any
+	_ = json.Unmarshal(mnResp.Data, &mnObj)
+	mnID := int64(mnObj["id"].(float64))
+
+	code, badShare, _ := e.req("POST", fmt.Sprintf("/api/v1/monitoring/notes/%d/share", mnID), monTok, map[string]any{
+		"user_ids": []int64{},
+	})
+	if code != 422 || badShare.Errors["share_ids"] == nil {
+		t.Fatalf("expected 422 with errors.share_ids, got code=%d errs=%v", code, badShare.Errors)
+	}
+	code, _, raw = e.req("POST", fmt.Sprintf("/api/v1/monitoring/notes/%d/share", mnID), monTok, map[string]any{
+		"user_ids": []int64{empID},
+	})
+	if code != 200 {
+		t.Fatalf("POST /monitoring/notes/share with user_ids failed (%d): %s", code, string(raw))
+	}
+
+	rules["read_only"] = map[string]any{"on": true, "message": "RO"}
+	_, _, _ = e.req("PUT", "/api/v1/admin/advanced", ceoTok, map[string]any{"rules": rules})
+	code, _, raw = e.req("POST", fmt.Sprintf("/api/v1/monitoring/notes/%d/seen", mnID), empTok, nil)
+	if code != 200 {
+		t.Fatalf("expected POST /monitoring/notes/%d/seen allowed in read-only mode, got %d: %s", mnID, code, string(raw))
+	}
+	rules["read_only"] = map[string]any{"on": false, "message": ""}
+	_, _, _ = e.req("PUT", "/api/v1/admin/advanced", ceoTok, map[string]any{"rules": rules})
+
+	// 8. Image attachment served with Content-Disposition: attachment
+	var mpBuf bytes.Buffer
+	mw := multipart.NewWriter(&mpBuf)
+	fw, _ := mw.CreateFormFile("file", "pic.png")
+	im := image.NewRGBA(image.Rect(0, 0, 4, 4))
+	im.Set(0, 0, color.RGBA{R: 255, A: 255})
+	_ = png.Encode(fw, im)
+	_ = mw.Close()
+	upReq, _ := http.NewRequest("POST", fmt.Sprintf("%s/api/v1/tasks/%d/attachments", e.srv.URL, tk1ID), &mpBuf)
+	upReq.Header.Set("Authorization", "Bearer "+empTok)
+	upReq.Header.Set("Content-Type", mw.FormDataContentType())
+	upRes, err := http.DefaultClient.Do(upReq)
+	if err != nil || upRes.StatusCode != 201 {
+		t.Fatalf("upload image attachment failed: %v", err)
+	}
+	var attEnv struct {
+		Data map[string]any `json:"data"`
+	}
+	_ = json.NewDecoder(upRes.Body).Decode(&attEnv)
+	upRes.Body.Close()
+
+	dlRes, err := http.Get(attEnv.Data["url"].(string))
+	if err != nil || dlRes.StatusCode != 200 {
+		t.Fatalf("download image attachment failed: %v", err)
+	}
+	dlRes.Body.Close()
+	if cd := dlRes.Header.Get("Content-Disposition"); !strings.HasPrefix(cd, "attachment;") {
+		t.Fatalf("expected image Content-Disposition attachment, got %q", cd)
+	}
+
+	// 9. Failed login with unknown email omits actor_id & target.id in audit JSON, AND audit filter works beyond 500 newer rows!
+	_, _, _ = e.req("POST", "/api/v1/auth/login", "", map[string]any{
+		"identifier": "missing-user@example.com", "password": "wrong",
+	})
+	code, audResp, _ := e.req("GET", "/api/v1/audit?action=login_failed", adminTok, nil)
+	if code != 200 {
+		t.Fatalf("GET /audit failed: %d", code)
+	}
+	var audRows []map[string]any
+	_ = json.Unmarshal(audResp.Data, &audRows)
+	if len(audRows) == 0 {
+		t.Fatalf("expected at least 1 login_failed audit row")
+	}
+	if _, hasActor := audRows[0]["actor_id"]; hasActor {
+		t.Fatalf("expected nil actor_id to be omitted from audit JSON, got %v", audRows[0])
+	}
+	tgt := audRows[0]["target"].(map[string]any)
+	if _, hasTID := tgt["id"]; hasTID {
+		t.Fatalf("expected nil target.id to be omitted from audit JSON, got %v", tgt)
+	}
+
+	// Insert 510 newer user_changed rows after login_failed -> filter action=login_failed must STILL find it!
+	for i := 0; i < 510; i++ {
+		_, _ = e.db.Exec(`INSERT INTO audit_logs (actor_id, action, target_type, target_id, target_label, at) VALUES (?, 'user_changed', 'user', ?, 'bulk', '2026-03-04 12:00:00')`, adminID, empID)
+	}
+	code, audFilteredResp, _ := e.req("GET", "/api/v1/audit?action=login_failed", adminTok, nil)
+	var audFiltered []map[string]any
+	_ = json.Unmarshal(audFilteredResp.Data, &audFiltered)
+	if code != 200 || len(audFiltered) == 0 {
+		t.Fatalf("expected SQL pre-filtered audit to still return login_failed beyond 500 newer rows, got code=%d len=%d", code, len(audFiltered))
+	}
+
+	// 10. Reports overview tie-breaker sort is deterministic across calls
+	_ = repTok
+	code1, r1, _ := e.req("GET", "/api/v1/reports/overview", ceoTok, nil)
+	code2, r2, _ := e.req("GET", "/api/v1/reports/overview", ceoTok, nil)
+	if code1 != 200 || code2 != 200 || string(r1.Data) != string(r2.Data) {
+		t.Fatalf("expected deterministic reports overview ordering, got codes=%d/%d", code1, code2)
 	}
 }
