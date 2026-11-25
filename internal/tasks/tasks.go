@@ -1212,7 +1212,7 @@ func (s *Service) checkFields(ctx context.Context, p *access.Project, fields map
 		var role string
 		err := s.db.QueryRowContext(ctx, `SELECT active, role FROM users WHERE id = ?`, *aid).Scan(&active, &role)
 		if err != nil || active == 0 || role == "admin" {
-			return httpx.ErrValidation("assignee_id", "api.tasks.assignee_not_member")
+			return httpx.ErrValidation("assignee_id", "api.tasks.assignee_invalid")
 		}
 	}
 	start := optStr(fields["start"])

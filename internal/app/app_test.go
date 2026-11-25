@@ -1252,12 +1252,12 @@ func TestContractFixesParts1To3(t *testing.T) {
 	_ = json.Unmarshal(pResp.Data, &pObj)
 	pid := int64(pObj["id"].(float64))
 
-	// Admin cannot be assigned to a task
+	// Admin (and stopped account) cannot be assigned to a task, with the proper message (not "not a member")
 	code, admAssign, _ := e.req("POST", fmt.Sprintf("/api/v1/projects/%d/tasks", pid), pmTok, map[string]any{
 		"title": "Admin Task", "assignee_id": adminID,
 	})
-	if code != 422 || admAssign.Errors["assignee_id"] == nil {
-		t.Fatalf("expected 422 assignee_id for admin user, got code=%d errs=%v", code, admAssign.Errors)
+	if code != 422 || admAssign.Errors["assignee_id"] == nil || strings.Contains(admAssign.Message, "member") || strings.Contains(admAssign.Message, "أعضاء") {
+		t.Fatalf("expected 422 assignee_id with invalid assignee message (not member), got code=%d msg=%q errs=%v", code, admAssign.Message, admAssign.Errors)
 	}
 
 	// Non-member outsider auto-joins project when assigned a task
@@ -1445,6 +1445,12 @@ func TestContractFixesParts1To3(t *testing.T) {
 	if !strings.Contains(prNotifNote, "acme/app #77") {
 		t.Fatalf("expected github_pr_merged note 'acme/app #77', got %q", prNotifNote)
 	}
+	var pmGHNotif, empGHNotif int
+	_ = e.db.QueryRow(`SELECT COUNT(*) FROM notifications WHERE user_id = ? AND kind = 'github_pr_merged' AND task_id = ?`, pmID, tk2ID).Scan(&pmGHNotif)
+	_ = e.db.QueryRow(`SELECT COUNT(*) FROM notifications WHERE user_id = ? AND kind = 'github_pr_merged' AND task_id = ?`, empID, tk2ID).Scan(&empGHNotif)
+	if pmGHNotif != 0 || empGHNotif != 1 {
+		t.Fatalf("expected github_pr_merged to notify assignee only (pm=%d emp=%d)", pmGHNotif, empGHNotif)
+	}
 
 	// 6. Search returns {q, hits}
 	code, srchResp, _ := e.req("GET", "/api/v1/search?q=CoreApp", empTok, nil)
@@ -1539,15 +1545,35 @@ func TestContractFixesParts1To3(t *testing.T) {
 		t.Fatalf("expected nil target.id to be omitted from audit JSON, got %v", tgt)
 	}
 
-	// Insert 510 newer user_changed rows after login_failed -> filter action=login_failed must STILL find it!
-	for i := 0; i < 510; i++ {
-		_, _ = e.db.Exec(`INSERT INTO audit_logs (actor_id, action, target_type, target_id, target_label, at) VALUES (?, 'user_changed', 'user', ?, 'bulk', '2026-03-04 12:00:00')`, adminID, empID)
+	// Insert an old distinct row with IP, changes JSON, and known actor email, then bury it under 5,100 newer bulk rows!
+	_, _ = e.db.Exec(`INSERT INTO audit_logs (actor_id, action, target_type, target_id, target_label, changes, ip, at) VALUES (?, 'user_changed', 'user', ?, 'Special Target', '[{"field":"job_title","from":"JuniorDev","to":"SeniorArch"}]', '198.51.100.77', '2026-01-01 00:00:00')`, pmID, empID)
+	vals := make([]string, 0, 500)
+	for i := 0; i < 500; i++ {
+		vals = append(vals, fmt.Sprintf("(%d, 'user_changed', 'user', %d, 'bulk', '2026-03-04 12:00:00')", adminID, empID))
 	}
-	code, audFilteredResp, _ := e.req("GET", "/api/v1/audit?action=login_failed", adminTok, nil)
-	var audFiltered []map[string]any
-	_ = json.Unmarshal(audFilteredResp.Data, &audFiltered)
-	if code != 200 || len(audFiltered) == 0 {
-		t.Fatalf("expected SQL pre-filtered audit to still return login_failed beyond 500 newer rows, got code=%d len=%d", code, len(audFiltered))
+	bulkSQL := `INSERT INTO audit_logs (actor_id, action, target_type, target_id, target_label, at) VALUES ` + strings.Join(vals, ",")
+	for b := 0; b < 11; b++ {
+		if _, err := e.db.Exec(bulkSQL); err != nil {
+			t.Fatalf("bulk audit insert failed: %v", err)
+		}
+	}
+
+	for _, tc := range []struct {
+		name  string
+		query string
+	}{
+		{"action_beyond_5000", "/api/v1/audit?action=login_failed"},
+		{"q_email_beyond_5000", "/api/v1/audit?q=pm@example.com"},
+		{"q_ip_beyond_5000", "/api/v1/audit?q=198.51.100.77"},
+		{"q_changes_beyond_5000", "/api/v1/audit?q=SeniorArch"},
+		{"q_action_words_beyond_5000", "/api/v1/audit?q=" + strings.ReplaceAll("failed sign-in", " ", "%20")},
+	} {
+		code, aResp, _ := e.req("GET", tc.query, adminTok, nil)
+		var rows []map[string]any
+		_ = json.Unmarshal(aResp.Data, &rows)
+		if code != 200 || len(rows) == 0 {
+			t.Fatalf("audit filter %s (%s) returned code=%d len=%d", tc.name, tc.query, code, len(rows))
+		}
 	}
 
 	// 10. Reports overview tie-breaker sort is deterministic across calls

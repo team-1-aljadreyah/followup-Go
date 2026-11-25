@@ -503,13 +503,10 @@ func (s *Service) notifyMergedPR(ctx context.Context, repoName, title, extID str
 			continue
 		}
 		p := projMap[h.pid]
-		if p == nil {
+		if p == nil || !h.assignee.Valid || h.assignee.Int64 <= 0 {
 			continue
 		}
-		recs := []int64{p.PMID}
-		if h.assignee.Valid && h.assignee.Int64 > 0 && h.assignee.Int64 != p.PMID {
-			recs = append(recs, h.assignee.Int64)
-		}
+		recs := []int64{h.assignee.Int64}
 		d := notifications.AboutTask(h.code, h.title, p.Name, p.NameEn)
 		prNote := repoName
 		if prNum := strings.TrimPrefix(extID, "pr:"); prNum != "" && prNum != extID {

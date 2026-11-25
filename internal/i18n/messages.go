@@ -111,6 +111,7 @@ var messages = map[string]pair{
 	"api.tasks.title_max":                {"العنوان أطول من :max حرفاً.", "The title is longer than :max letters."},
 	"api.tasks.description_max":          {"الوصف أطول من المسموح.", "The description is too long."},
 	"api.tasks.assignee_not_member":      {"المسؤول عن المهمة ليس من أعضاء المشروع.", "The assignee is not a member of the project."},
+	"api.tasks.assignee_invalid":         {"لا يمكن إسناد المهام إلى هذا الحساب.", "This person can't be given tasks."},
 	"api.tasks.due_before_start":         {"موعد التسليم قبل تاريخ البدء.", "The due date is before the start date."},
 	"api.tasks.sprint_not_in_project":    {"الدورة ليست من هذا المشروع.", "The sprint is not in this project."},
 	"api.tasks.sprint_closed":            {"انتهت هذه الدورة: اختر دورة مفتوحة.", "This sprint has ended: choose an open one."},

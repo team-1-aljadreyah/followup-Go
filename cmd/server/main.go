@@ -38,6 +38,7 @@ func main() {
 	// Optional in-process daily reminder scheduler (baghdad 08:00), idempotent via dedup_key.
 	stopSched := make(chan struct{})
 	if strings.EqualFold(os.Getenv("ENABLE_DAILY_SCHEDULER"), "true") || os.Getenv("ENABLE_DAILY_SCHEDULER") == "1" {
+		log.Printf("daily reminder scheduler enabled (08:00 %s)", cfg.WorkingTimezone)
 		go func() {
 			ticker := time.NewTicker(15 * time.Minute)
 			defer ticker.Stop()

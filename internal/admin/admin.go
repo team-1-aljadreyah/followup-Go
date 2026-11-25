@@ -49,6 +49,33 @@ var auditActionKind = map[string]string{
 	"rating_changed": "review", "rating_deleted": "review",
 }
 
+var auditActionWords = map[string][2]string{
+	"user_created":         {"أضاف مستخدماً", "added a user"},
+	"user_changed":         {"عدّل مستخدماً", "changed a user"},
+	"user_stopped":         {"أوقف حساباً", "stopped an account"},
+	"user_restarted":       {"أعاد تشغيل حساب", "restarted an account"},
+	"user_unlocked":        {"فتح حساباً مقفلاً", "unlocked an account"},
+	"team_created":         {"أنشأ فريقاً", "created a team"},
+	"team_changed":         {"عدّل فريقاً", "changed a team"},
+	"settings_changed":     {"غيّر الإعدادات", "changed the settings"},
+	"login_failed":         {"محاولة دخول خاطئة", "failed sign-in"},
+	"login_locked":         {"قُفل حساب", "account locked"},
+	"project_created":      {"أنشأ مشروعاً", "created a project"},
+	"project_pm_changed":   {"غيّر مدير قسم", "changed a project's department manager"},
+	"sprint_closed":        {"أنهى دورة", "ended a sprint"},
+	"template_deleted":     {"حذف قالباً", "removed a template"},
+	"announcement_deleted": {"حذف إعلاناً", "removed an announcement"},
+	"criteria_changed":     {"غيّر معايير التقييم", "changed the review criteria"},
+	"criteria_approved":    {"اعتمد معايير التقييم", "approved the review criteria"},
+	"review_finalized":     {"اعتمد تقييم أداء", "made a review final"},
+	"picture_removed":      {"أزال صورة شخصية", "removed a profile picture"},
+	"session_ended":        {"أنهى جلسة دخول", "ended a sign-in session"},
+	"sessions_ended":       {"أخرج حساباً من كل الأجهزة", "signed an account out everywhere"},
+	"users_imported":       {"استورد حسابات", "imported accounts"},
+	"rating_changed":       {"عدّل تقييماً سريعاً كتبه غيره", "changed someone else's quick rating"},
+	"rating_deleted":       {"حذف تقييماً سريعاً", "removed a quick rating"},
+}
+
 func normalizeAuditAction(action string) string {
 	switch action {
 	case "user_updated":
@@ -1561,7 +1588,7 @@ func (s *Service) HandleAudit(w http.ResponseWriter, r *http.Request) {
 
 	sqlQuery := `
 		SELECT a.id, a.actor_id, a.action, a.target_type, a.target_id, a.target_label, a.changes, a.at, a.ip, a.user_agent, a.session_id, a.request_id,
-		       u.name, u.name_en, u.role
+		       u.name, u.name_en, u.role, u.email
 		FROM audit_logs a
 		LEFT JOIN users u ON u.id = a.actor_id`
 	if len(where) > 0 {
@@ -1570,8 +1597,6 @@ func (s *Service) HandleAudit(w http.ResponseWriter, r *http.Request) {
 	sqlQuery += " ORDER BY a.at DESC, a.id DESC"
 	if textQ == "" && ipFilter == "" {
 		sqlQuery += " LIMIT 200"
-	} else {
-		sqlQuery += " LIMIT 5000"
 	}
 
 	rows, err := s.db.QueryContext(ctx, sqlQuery, args...)
@@ -1610,7 +1635,7 @@ func (s *Service) HandleAudit(w http.ResponseWriter, r *http.Request) {
 		if toDay != "" && raw.baghdadDay != "" && raw.baghdadDay > toDay {
 			continue
 		}
-		if textQ != "" && !support.SearchMatches(textQ, raw.targetLabel, strValPtr(raw.actorName), strValPtr(raw.actorNameEn), action) {
+		if textQ != "" && !auditMatchesQuery(textQ, raw) {
 			continue
 		}
 		out = append(out, raw.toJSON())
@@ -1636,7 +1661,7 @@ func (s *Service) HandleAuditDetail(w http.ResponseWriter, r *http.Request) {
 
 	row := s.db.QueryRowContext(ctx, `
 		SELECT a.id, a.actor_id, a.action, a.target_type, a.target_id, a.target_label, a.changes, a.at, a.ip, a.user_agent, a.session_id, a.request_id,
-		       u.name, u.name_en, u.role
+		       u.name, u.name_en, u.role, u.email
 		FROM audit_logs a
 		LEFT JOIN users u ON u.id = a.actor_id
 		WHERE a.id = ?
@@ -1651,7 +1676,7 @@ func (s *Service) HandleAuditDetail(w http.ResponseWriter, r *http.Request) {
 	if entry.actorID != nil && *entry.actorID > 0 {
 		arows, _ := s.db.QueryContext(ctx, `
 			SELECT a.id, a.actor_id, a.action, a.target_type, a.target_id, a.target_label, a.changes, a.at, a.ip, a.user_agent, a.session_id, a.request_id,
-			       u.name, u.name_en, u.role
+			       u.name, u.name_en, u.role, u.email
 			FROM audit_logs a LEFT JOIN users u ON u.id = a.actor_id
 			WHERE a.actor_id = ? AND a.id != ?
 			ORDER BY a.at DESC, a.id DESC LIMIT 100
@@ -1679,7 +1704,7 @@ func (s *Service) HandleAuditDetail(w http.ResponseWriter, r *http.Request) {
 			}
 			trows, _ = s.db.QueryContext(ctx, `
 				SELECT a.id, a.actor_id, a.action, a.target_type, a.target_id, a.target_label, a.changes, a.at, a.ip, a.user_agent, a.session_id, a.request_id,
-				       u.name, u.name_en, u.role
+				       u.name, u.name_en, u.role, u.email
 				FROM audit_logs a LEFT JOIN users u ON u.id = a.actor_id
 				WHERE a.id != ? AND ((a.target_type = ? AND a.target_id = ?) OR (a.target_type = ? AND a.target_id = ?))
 				ORDER BY a.at DESC, a.id DESC LIMIT 20
@@ -1687,7 +1712,7 @@ func (s *Service) HandleAuditDetail(w http.ResponseWriter, r *http.Request) {
 		} else {
 			trows, _ = s.db.QueryContext(ctx, `
 				SELECT a.id, a.actor_id, a.action, a.target_type, a.target_id, a.target_label, a.changes, a.at, a.ip, a.user_agent, a.session_id, a.request_id,
-				       u.name, u.name_en, u.role
+				       u.name, u.name_en, u.role, u.email
 				FROM audit_logs a LEFT JOIN users u ON u.id = a.actor_id
 				WHERE a.id != ? AND a.target_type = ? AND a.target_id = ?
 				ORDER BY a.at DESC, a.id DESC LIMIT 20
@@ -1696,7 +1721,7 @@ func (s *Service) HandleAuditDetail(w http.ResponseWriter, r *http.Request) {
 	} else {
 		trows, _ = s.db.QueryContext(ctx, `
 			SELECT a.id, a.actor_id, a.action, a.target_type, a.target_id, a.target_label, a.changes, a.at, a.ip, a.user_agent, a.session_id, a.request_id,
-			       u.name, u.name_en, u.role
+			       u.name, u.name_en, u.role, u.email
 			FROM audit_logs a LEFT JOIN users u ON u.id = a.actor_id
 			WHERE a.id != ? AND a.target_type = ? AND a.target_id IS NULL AND a.target_label = ?
 			ORDER BY a.at DESC, a.id DESC LIMIT 20
@@ -1858,21 +1883,23 @@ func (s *Service) validateLeadID(ctx context.Context, raw any) (*int64, error) {
 type scanner interface{ Scan(dest ...any) error }
 
 type auditEntryRow struct {
-	id          int64
-	actorID     *int64
-	actorName   *string
-	actorNameEn *string
-	action      string
-	targetType  string
-	targetID    *int64
-	targetLabel string
-	changes     []any
-	atISO       *string
-	baghdadDay  string
-	ip          *string
-	userAgent   *string
-	sessionID   *string
-	requestID   *string
+	id           int64
+	actorID      *int64
+	actorName    *string
+	actorNameEn  *string
+	actorEmail   *string
+	action       string
+	targetType   string
+	targetID     *int64
+	targetLabel  string
+	changes      []any
+	changesWords []string
+	atISO        *string
+	baghdadDay   string
+	ip           *string
+	userAgent    *string
+	sessionID    *string
+	requestID    *string
 }
 
 func (e auditEntryRow) toJSON() map[string]any {
@@ -1903,14 +1930,26 @@ func scanAuditRow(sc scanner) (auditEntryRow, bool) {
 	var id int64
 	var actorID, targetID sql.NullInt64
 	var action, targetType, targetLabel string
-	var changesRaw, ip, ua, sid, reqID, aname, anameEn, arole sql.NullString
+	var changesRaw, ip, ua, sid, reqID, aname, anameEn, arole, aemail sql.NullString
 	var atRaw any
-	if err := sc.Scan(&id, &actorID, &action, &targetType, &targetID, &targetLabel, &changesRaw, &atRaw, &ip, &ua, &sid, &reqID, &aname, &anameEn, &arole); err != nil {
+	if err := sc.Scan(&id, &actorID, &action, &targetType, &targetID, &targetLabel, &changesRaw, &atRaw, &ip, &ua, &sid, &reqID, &aname, &anameEn, &arole, &aemail); err != nil {
 		return auditEntryRow{}, false
 	}
 	var changes []any
+	var changesWords []string
 	if changesRaw.Valid && strings.TrimSpace(changesRaw.String) != "" {
 		_ = json.Unmarshal([]byte(changesRaw.String), &changes)
+		for _, item := range changes {
+			if m, ok := item.(map[string]any); ok {
+				for _, ck := range []string{"field", "from", "to"} {
+					if v, ok := m[ck]; ok && v != nil {
+						if s := fmt.Sprint(v); s != "" {
+							changesWords = append(changesWords, s)
+						}
+					}
+				}
+			}
+		}
 	}
 	t := dbx.ParseTime(atRaw)
 	bDay := ""
@@ -1918,22 +1957,40 @@ func scanAuditRow(sc scanner) (auditEntryRow, bool) {
 		bDay = support.ToBaghdadDate(*t)
 	}
 	return auditEntryRow{
-		id:          id,
-		actorID:     nullIntPtr(actorID),
-		actorName:   nullStrPtr(aname),
-		actorNameEn: nullStrPtr(anameEn),
-		action:      normalizeAuditAction(action),
-		targetType:  targetType,
-		targetID:    nullIntPtr(targetID),
-		targetLabel: targetLabel,
-		changes:     changes,
-		atISO:       support.FormatISO(t),
-		baghdadDay:  bDay,
-		ip:          nullStrPtr(ip),
-		userAgent:   nullStrPtr(ua),
-		sessionID:   nullStrPtr(sid),
-		requestID:   nullStrPtr(reqID),
+		id:           id,
+		actorID:      nullIntPtr(actorID),
+		actorName:    nullStrPtr(aname),
+		actorNameEn:  nullStrPtr(anameEn),
+		actorEmail:   nullStrPtr(aemail),
+		action:       normalizeAuditAction(action),
+		targetType:   targetType,
+		targetID:     nullIntPtr(targetID),
+		targetLabel:  targetLabel,
+		changes:      changes,
+		changesWords: changesWords,
+		atISO:        support.FormatISO(t),
+		baghdadDay:   bDay,
+		ip:           nullStrPtr(ip),
+		userAgent:    nullStrPtr(ua),
+		sessionID:    nullStrPtr(sid),
+		requestID:    nullStrPtr(reqID),
 	}, true
+}
+
+func auditMatchesQuery(q string, raw auditEntryRow) bool {
+	fields := []string{
+		raw.targetLabel,
+		strValPtr(raw.actorName),
+		strValPtr(raw.actorNameEn),
+		strValPtr(raw.actorEmail),
+		strValPtr(raw.ip),
+		raw.action,
+	}
+	if w, ok := auditActionWords[raw.action]; ok {
+		fields = append(fields, w[0], w[1])
+	}
+	fields = append(fields, raw.changesWords...)
+	return support.SearchMatches(q, fields...)
 }
 
 func strValPtr(p *string) string {
